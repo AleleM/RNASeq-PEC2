@@ -1,0 +1,691 @@
+---
+title: "ADO- ANALISI"
+author: "Aleix Méndez López"
+date: "13/6/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Índex
+1. [Introducció y Objectius](#id1)
+
+  1.1 [Estructura del document](#id11)
+  
+  1.2 [Objectius](#id12)
+
+2. [Mètodes i Eines](#id2)
+
+3. [Preparació i definició de les dades](#id3)
+
+  3.1 [Llegir les dades](#id31)
+  
+  3.2 [Obtenció de les mostres aleatories](#id32)
+  
+  3.3 [Matriu de les dades crues](#id33)
+
+4. [Processament de les dades](#id4)
+
+  4.1 [Pre-filtratge](#id41)
+  
+  4.2 [Variance Stabilizing Transformation](#id42)
+  
+  4.3 [Distancia entre mostres](#id43)
+
+5. [Anàlisi de gens diferencialment expressats](#id5)
+
+  5.1 [La funció DESeq](#id51)
+  
+  5.2 [Taules de resultats](#id52)
+  
+  5.3 [Gens infraexpressats](#id53)
+  
+  5.4 [Gens sobrexpressats](#id54)
+
+6. [Patrons d'expressió i Clusters](#id6)
+  
+  6.1 [Contatges](#id61)
+
+  6.2 [Clusterings amb mapes de calor](#id62)
+
+7. [Anotació dels resultats](#id7)
+
+  7.1 [Anotació dels gens sobreexpressats](#id71)
+  
+  7.2 [Anotació dels gens infraexpressats](#id72)
+
+8. [Significancia Biològica](#id8)
+
+  8.1 [Enriquiment dels resultats](#id81)
+  
+  8.2 [Visualització funcional del gens](#id82)
+  
+9. [Conclusió](#id9)
+
+
+<div id='id1' />
+## 1. Introducció y Objectius
+
+Aquest document presenta un exemple de pipeline desenvolupat amb R/Bioconductor que serveixi de pauta o guia de com realitzar un anàlisi de RNAseq que pugui donar forma a un artícle científic.
+
+<div id='id11' />
+### 1.1 Estructura del document
+
+Un article científic consta d'unes parts molt ben establertes. Aquest document no les complirà estrictament, sinó que mostrarà un exemple, creat apartir dels mètodes d'anàlisi explicats en aquesta assignatura, de com tractar unes determinades dades amb la finalitat dinterpretar-les i generar un resultat.
+
+### 1.2 Objectius
+
+L'objectiu de l'anàlisi és desenvolupar un estudi sobre tiroides on s'utilitzaran dades d'expressió d'RNA-seq per a trobrar gens diferencialment expressats en tres tipos d'infiltració mitja: NIT (Not infiltrated tissues), SFI (Small focal infiltrates) i ELI (Extensive lymphoys infiltrates).
+
+<div id='id2' />
+## 2. Mètodes i Eines
+
+Primer definirem les dades: En aquest cas partirem directament d'un arxiu que conté les dades de les mostres d'un estudi obtingut en el repostori GTEX. Aquest arxiu conté 292 mostres de dades d'expressió (RNAseq) que pertanyen a un anàlisi de tiroides. L'anàlisi de les dades es farà seleccionant aleatoriament 30 mostres (10 per cada teixit).  Aquestes dades en crues s'hauran de manipular per obtenir una matriu de dades crues on es relecioni cada mostra amb el contatge de cada gen. 
+
+Un cop tenim les dades preparades procedirem al filtratge i a la transformació d'aquestes on utilitzarem el paquet de Bioconductor Deseq2 que ofereix dues transformacions per a les dades de recompte que estabilitzen la variància entre la mitjana: la transformació estabilitzant la variància (VST) per a dades binòmiques negatives amb una tendència a la mitjana de dispersió (Anders i Huber 2010), implementades en la funció vst i el regularized-logarithm transformation o rlog (Love, Huber i Anders 2014). 
+
+La identificació dels gens diferencialment expressats també la realitzarem amb el paquet de Bioconductor Deseq2, la cerca de patrons (clusters) la realitzarem amb el les funcions que et dóna el paquet genefilter, l'anotació dels resultats es farà apartir de la base de dades del paquet "AnnotationDbi" i l'anàlisi de significació biològica 
+
+
+```{r message=FALSE, include=FALSE}
+if(!require(BiocManager)) install.packages("BiocManager")
+if(!require(airway)) BiocManager::install("airway")
+if(!require(Rsamtools)) BiocManager::install("Rsamtools")
+if(!require(GenomicFeatures)) BiocManager::install("GenomicFeatures")
+if(!require(DESeq2)) BiocManager::install("DESeq2")
+if(!require(apeglm)) BiocManager::install("apeglm")
+if(!require(BiocParallel)) BiocManager::install("BiocParallel")
+if(!require(genefilter)) BiocManager::install("genefilter")
+if(!require(org.Hs.eg.db)) BiocManager::install("org.Hs.eg.db")
+if(!require(AnnotationDbi)) BiocManager::install("AnnotationDbi")
+if(!require(ReportingTools)) BiocManager::install("ReportingTools")
+if(!require(RUVSeq)) BiocManager::install("RUVSeq")
+if(!require(sva)) BiocManager::install("sva")
+if(!require(Gviz)) BiocManager::install("Gviz")
+if(!require(magrittr)) install.packages("magrittr", dep=TRUE)
+if(!require(dplyr)) install.packages("dplyr", dep=TRUE)
+if(!require(ggplot2)) install.packages("ggplot2", dep=TRUE)
+if(!require(pheatmap)) install.packages("pheatmap", dep=TRUE)
+if(!require(RColorBrewer)) install.packages("RColorBrewer", dep=TRUE)
+if(!require(ggbeeswarm)) install.packages("ggbeeswarm", dep=TRUE)
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("clusterProfiler")
+```
+
+<div id='id3' />
+## 3. Preparació i definició de les dades 
+
+El nostre anàlisi comença amb 2 arxius que contenen les nostres dades. El primer arxiu s'anomena target i conté la informació de cada mostra i el segon arxiu s'anomena count i conté els contatges de cada seqüencia de RNA de cada mostra. 
+
+<div id='id31' />
+### 3.1 Legir les dades
+
+```{r}
+
+target = read.csv("targets.csv", header=T, sep=",")
+counts = read.csv("counts.csv", header=T, sep=";")
+head(target)
+
+```
+
+
+Els arxius contenen 292 mostres i necessitem  seleccionar 10 mostres aleatories de cada subgrup (NIT, SFI, ELI). Primer crearé un arxiu "targuet" pels tres subconjun.
+
+```{r echo=FALSE}
+NIT = target[target$Group=="NIT",]
+SFI = target[target$Group=="SFI",]
+ELI = target[target$Group=="ELI",]
+
+head(NIT)
+head(SFI)
+head(ELI)
+
+```
+<div id='id32' />
+### 3.2 Obtenció de les dades aleatories
+
+Amb el codi següent seleccionaré les mostres aleatòries de cada subconjunt i els uniré per files per tornar a tenir finalment un sol data frame. D'aquesta manera em quedarà un data.frame amb 10 mostres aleatòries de cada subgrup. 
+
+```{r echo=TRUE}
+set.seed(1)
+select_target = rbind(NIT[sample(nrow(NIT), 10),],SFI[sample(nrow(SFI), 10),],ELI[sample(nrow(ELI), 10),])
+head(select_target,30)
+
+
+```
+<div id='id33' />
+### 3.3 Matriu de dades crues
+
+Per a poder relacionar els dos arxius (l'arxiu target creat i l'arxiu count) necessitem que els noms de la columna Sample_Name tinguin el mateix format que les columnes de l'arxiu count, per tant, reemplacem els "-" per "."
+
+```{r echo=FALSE}
+sample_names_targets = gsub("-", ".", select_target$Sample_Name)
+head(sample_names_targets)
+
+```
+
+Un cop tenim els noms de les mostres (seleccionades aleatoriament) amb el mateix format que les columnes de count. Seleccionarem les columnes del data.frame counts que coincideixin amb les mostres seleccionades anteriorment. 
+
+```{r include=FALSE}
+select_count=counts[,sample_names_targets]
+head(select_count)
+```
+
+Ara ja tenim un data frame amb les mostres que ens interessen (columnes) i la informació genètica de cada mostra, és a dir, cada seqüencia de RNA (files). Per acabar de completar el data frame afegiré el nom que li correspón a cada fila. 
+
+```{r echo=FALSE}
+rownames(select_count) <- counts$X
+head(select_count)
+```
+
+Finalment ja tenim la nostra matriu amb les nostres dades crues. Per a seguir amb l'estudi transformaré aquesta matriu en un objecte de classe DESeqDataSet.
+
+```{r include=FALSE}
+if(!require(DESeq2)) BiocManager::install("DESeq2")
+
+```
+
+```{r}
+
+ddsMat <- DESeqDataSetFromMatrix(countData = select_count,
+                                 colData = select_target,
+                                 design = ~ Group)
+
+ddsMat
+```
+
+<div id='id4' />
+## 4. Processament de les dades 
+
+<div id='id41' />
+### 4.1 Pre-filtratge
+
+En aquest pas eliminarem les files que no tenen cap o gairebé cap informació. Amb aquesta funció suprimim les files del DESeqDataSet que no tenen comptatge o que el tenen molt baix.
+
+```{r}
+
+nrow(ddsMat)
+dds <- ddsMat[ rowSums(counts(ddsMat)) > 1, ]
+nrow(dds)
+
+```
+
+<div id='id42' />
+### 4.2 variance Stabilizing Transformation
+
+La funció VST permet transformar les dades per estabilitzanr la variança. He escollit aquesta funció perquè és ràpida, i treballa bé amb contatges mitjans i grans, a més, el resultat dels comptatges més baixos no erens tan variables com ho eren amb altres funcions com la rlog.
+
+
+```{r}
+vsd <- vst(dds, blind = FALSE)
+head(assay(vsd), 3)
+colData(vsd)
+
+```
+
+<div id='id43' />
+
+### 4.3 Distancia entre mostres
+
+Per avaluar la similitud global entre les mostres i saber quines mostres s’assemblen entre elles Utilitzem la funció d'R "dist". Per assegurar-nos que tenim una distribució  aproximadament igual de tots els gens, utilitzem les dades transformades VST.
+
+```{r}
+sampleDists <- dist(t(assay(vsd)))
+
+```
+
+
+```{r echo=FALSE}
+library("pheatmap")
+library("RColorBrewer")
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <- paste( vsd$Group, sep = " - " )
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+
+```
+
+De manera general, amb aquest mapa de calor observem que les mostres del grup ELI estan més distanciades a la de la resta dels grups i que els grups NIT i SFI són més propers. 
+
+En el següent gràfic es mostra la variança entre les mostres dels diferents grups. Observem que les mostres que pertanyen en el grup ELI tenen una variança més elevada i que el grup NIT és el que té una variança gènica més baixa.
+
+
+
+```{r echo=FALSE}
+plotPCA(vsd, intgroup = "Group")
+
+
+```
+
+<div id='id5' />
+## 5. Anàlisi de gens diferencialment expressats
+
+Ara ja tenim una idea general de la tendencia de l'expressió gènica dels nostres grups. Per realitzar l'anàlisi d'expressió diferencial utilitzaré les dades crues sense transformar, però sí pre-filtrades. 
+
+<div id='id51' />
+### 5.1 La funció DESeq
+
+Per a realitzar l'anàlisi d'expressió diferencial utilitzarem la funció Deseq2. Aquesta funció transforma per ella sola les dades de manera que he d'utilitzar les dades crues sense normalitzar. Deseq2 disposa d'una funció que realitza de forma predeterminada els passos necessaris per l'analisi de l'expressió génica diferencial basat en la distribució binomial negativa. Aquests passos inclouen:
+
+- Normalització de les dades
+- Estimació de la dispersió
+- L'ajust de les dades a un model lineal generalitzat
+- Comprobació de l'expressió diferencial de cada transcrit mitjançant la realització del test paramètric Wald
+
+
+
+```{r}
+
+ddsres <- DESeq(dds, parallel =TRUE)
+
+```
+
+DESeq2 utilitza l'ajust de Benjamini-Hochberg (BH) (Benjamini i Hochberg 1995) implementat en la funció R p.adjust. Aquest mètode calcula per a cada gen un valor de p ajustat que respon a la següent pregunta: si fosin significatius tots els gens amb un valor adjustedp inferior o igual al llindar de valor adjustp per aquest gen, quina seria la fracció de falsos positius (FDR) entre ells?  Aquests valors, anomenats valors p ajustats amb BH, es troben a a columna padj.
+
+Volem trobar els gens més diferencialment expressats en cada una de les 3 comparacions que es volen fer: SFI vs NIT, ELI vs NIT i ELI vs SFI.
+
+<div id='id52' />
+### 5.2 Construcció de les taules de resultats de cada comparació:
+
+```{r echo=FALSE}
+resSvN <- results(ddsres, contrast= c("Group", "SFI","NIT" ))
+resSvN
+resEvN <- results(ddsres, contrast= c("Group", "ELI","NIT" ))
+resEvN
+resEvS <- results(ddsres, contrast= c("Group", "ELI","SFI" ))
+resEvS
+```
+
+La primera columna, baseMean, és la mitjana de les lectures normalitzades.
+
+La columna log2FoldChange és l'estimació de la mida de l'efecte. Ens explica quant ha variat l'expressió del gen entre els grups. Mostra el canvi de la proporció de les lectures, en finció del log2, per el diseny proposat.
+
+La columna lfcSE fa referencia al error estàndar. Que mostra l'incertesa associada.
+
+La columna stat correspon al valor de l'estadístic Wald.
+
+Les columnes pvalue i padj són les columnes per la qual obtindrem els transcrits diferencialment expressats.
+
+Els gens obtinguts estan ordenats de la mateixa manera que en la matriu de contatge, per tant, haurem d'ordenar els gens en finció del se valor p.
+
+S'han creat 3 data frames. Cada columna té informació (metadata) sobre el seu significat:
+```{r echo=FALSE}
+mcols(resSvN, use.names = TRUE)
+mcols(resEvN, use.names = TRUE)
+mcols(resEvS, use.names = TRUE)
+```
+
+
+També podem resumir els resultats amb la següent línia de codi, que proporciona informació addicional:
+
+```{r}
+summary(resSvN)
+summary(resEvN)
+summary(resEvS)
+
+```
+
+La sortida d'aquesta funció proporciona el número de gens que presenten un valor logFC significativament negatiu o significativament positiu a un nivell de significació de 0.1.
+
+<div id='id53' />
+###5.3 Gens mes infraregulats:
+
+Fem un nou subconjunt apartir de la taula de resultats anteriors i la classifiquem segons l'estimació del log2fc per obtenir els gens significatius més down-regulated:
+
+Per obtenir-los obtindrem els gens que tinguin un padj < 0.1 i d'aquests els que tinguin un log2FoldChange més baix.
+
+
+```{r}
+resSigSvN <- subset(resSvN, padj < 0.1)
+head(resSigSvN[ order(resSigSvN$log2FoldChange), ])
+
+resSigEvN <- subset(resEvN, padj < 0.1)
+head(resSigEvN[order(resSigEvN$log2FoldChange), ])
+
+resSigEvS <- subset(resEvS, padj < 0.1)
+head(resSigEvS[ order(resSigEvS$log2FoldChange), ])
+
+```
+
+<div id='id54' />
+### 5.4 Gens mes sobre-regulats:
+
+I els gens significativament més sobre-expressats en les 3 comparacions s'han obtingut seleccionant els gens amb un padj < 0.1 i ordenant-los segons els que tenen el log2FoldChange més alt.           
+
+```{r}
+
+
+UPregSvN = resSigSvN[ order(resSigSvN$log2FoldChange, decreasing = TRUE), ]
+head(UPregSvN)
+
+UPregEvN = resSigEvN[order(resSigEvN$log2FoldChange, decreasing = TRUE), ]
+head(UPregEvN)
+
+UPregEvS = resSigEvS[ order(resSigEvS$log2FoldChange, decreasing = TRUE), ]
+head(UPregEvS)
+
+```
+
+<div id='id6' />
+##6. Patrons d'expressió i Clusters
+
+Examinarem el nombre de lectures d'un sol gen a través dels grups.Amb la funció plotCounts normalitzem els recomptes seqüenciant la profunditat i afegeixint un pseudocount de 1/2 per permetre la representació dels registres. Els recomptes s’agrupen segons les variables Group. obtenim els gens que tenen el valor p més petit de les tauls de resultats creades anteriorment. 
+
+<div id='id61' />
+### 6.1. Contatges
+
+###Grafic de contatges per a la comparació dels gens diferencials entre el grup SFI i NIT:
+
+En aquesta comparació els gens seleccionats tenen un nombre de contatges més elevats en el grup ELI. El grup SFI té un nombre de contatgtes més elevat que el grup NIT.
+
+```{r echo=FALSE}
+topGene <- rownames(resSigSvN)[which.min(resSigSvN$padj)]
+library("ggbeeswarm")
+geneCounts <- plotCounts(dds, gene = topGene, intgroup = c("Group"),
+                         returnData = TRUE)
+ggplot(geneCounts, aes(x = Group, y = count)) +
+  scale_y_log10() + geom_point(size = 3) + geom_line()
+```
+
+
+### Grafic de contatges per a la comparació dels gens diferencials entre el grup ELI i NIT:
+
+En aquesta comparació, els gens seleccionats que tenen un contatge més elevat corresponen al grup ELI. Tambés són lleugerament més elevats en el grup SFI que els del grup NIT.
+
+```{r echo=FALSE}
+topGene <- rownames(resSigEvN)[which.min(resSigEvN$padj)]
+library("ggbeeswarm")
+geneCounts <- plotCounts(dds, gene = topGene, intgroup = c("Group"),
+                         returnData = TRUE)
+ggplot(geneCounts, aes(x = Group, y = count)) +
+  scale_y_log10() + geom_point(size = 3) + geom_line()
+```
+
+
+### Grafic de contatges per a la comparació dels gens diferencials entre el grup ELI  i SFI:
+
+En aquesta comparació els gens seleccionats tenen un nombre de contatges més elevats en el grup ELI.
+
+```{r echo=FALSE}
+topGene <- rownames(resSigEvS)[which.min(resSigEvS$padj)]
+library("ggbeeswarm")
+geneCounts <- plotCounts(dds, gene = topGene, intgroup = c("Group"),
+                         returnData = TRUE)
+ggplot(geneCounts, aes(x = Group, y = count)) +
+  scale_y_log10() + geom_point(size = 3) + geom_line()
+```
+
+
+Aquests resultats concordarien amb el que esperaríem ja que el grup ELI correspon al grup de teixits en que hi ha més infiltració.
+
+<div id='id62' />
+### 6.2 Clusterings amb mapes de calor
+
+Per interpretar bé els mapes de calors no ens hem de fixar en la força d’expressió absoluta, sinó en la quantitat que cada gen es desvia en una determinada mostra respecte la mitjana dels gens de totes les mostres. 
+
+```{r echo=FALSE}
+library("genefilter")
+topVarGenes <- head(order(rowVars(assay(vsd)), decreasing = TRUE), 20)
+mat  <- assay(vsd)[topVarGenes, ]
+mat  <- mat - rowMeans(mat)
+anno <- as.data.frame(colData(vsd)[,c("Group","Experiment")])
+pheatmap(mat, annotation_col = anno)
+
+```
+
+Veiem com els resultats de les mostres de cada grup tendeixen a agrupar-se.
+
+<div id='id7' />
+## 7. Anotació dels resultats
+
+Fins ara, he treballat amb els rownames que corresponen a cada fragment de RNA segit del el seu ID de versió. Aquest ID final està anotat com ".XX". Per poder relacionar cada codi de cada comparació amb el seu gen corresponent, he de treure aquesta part de cada rowname dels nostres resultats. Un cop tret, ja puc relacionar el identificador amb la base de dades que conté el seu nom.
+
+
+Seguidament obtindrem els gens que hem considerat anteriorment més sobre-regugalts , però contindran 2 columnes més: les columnes SYMBOL i ENTREZ.
+
+<div id='id71' />
+### 7.1 Anotació de la taula de resultats dels gens més sobre-expressats en les 3 comparacions
+
+### Comparació entre el grup SFI i NIT.
+
+```{r echo=FALSE}
+library("AnnotationDbi")
+if(!require(org.Hs.eg.db)) BiocManager::install("org.Hs.eg.db")
+columns(org.Hs.eg.db)
+
+UPregSvN$symbol <- mapIds(org.Hs.eg.db,
+                     keys=gsub("\\..*", "", row.names(UPregSvN)),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+UPregSvN$entrez <- mapIds(org.Hs.eg.db,
+                     keys=gsub("\\..*", "", row.names(UPregSvN)),
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+UresSvNOrdered <- UPregSvN[order(UPregSvN$log2FoldChange, decreasing = TRUE),]
+head(UresSvNOrdered,10)
+```
+En aques cas, aproximadament la meitat dels resultats no tenen un gen symbol o codi enterez associat, això ho relaciona a dos motius, un podria ser que encara no existeixi suficient informació sobre aquest fragment de RNA que correspon a aquest gen. I l'altre, que la base de dades utilitzada sigui pobre. En aquest cas, després de fer algunes proves em decantaré per la primera opció. Partint d'aquesta base, intueixo que la funció d'aquest gen no és suficientment rellevant i serà difícil poder realitzar l'estudi de significat biològic.
+
+### comparació entre el grup ELI i NIT. 
+
+```{r echo=FALSE}
+UPregEvN$symbol <- mapIds(org.Hs.eg.db,
+                     keys=gsub("\\..*", "", row.names(UPregEvN)),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+UPregEvN$entrez <- mapIds(org.Hs.eg.db,
+                     keys=gsub("\\..*", "", row.names(UPregEvN)),
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+UresEvNOrdered <- UPregEvN[order(UPregEvN$log2FoldChange, decreasing = TRUE),]
+head(UresEvNOrdered,10)
+
+```
+
+En aquesta comparació veiem que la majoria dels gens obtinguts com els mes sobre-expressats diferencialment sí que tenen codi gen symbol i codi enterez. Pot ser un síntoma de que aquest grup ens permetrar fer un estudi de significancia biològica millor.  
+
+### Comparació entre el grup ELI i SFI.
+
+```{r echo=FALSE}
+UPregEvS$symbol <- mapIds(org.Hs.eg.db,
+                     keys=gsub("\\..*", "", row.names(UPregEvS)),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+UPregEvS$entrez <- mapIds(org.Hs.eg.db,
+                     keys=gsub("\\..*", "", row.names(UPregEvS)),
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+UresEvSOrdered <- UPregEvS[order(UPregEvS$log2FoldChange, decreasing = TRUE),]
+head(UresEvSOrdered,10)
+
+
+```
+En aquesta comparació veiem que la majoria dels gens seleccionats no tenen codi enterez ni gen symbol.
+
+<div id='id72' />
+### 7.2 Anotació de la taula de resultats dels gens més infra-expressats
+
+
+### Comparació entre el grup SFI i NIT.
+
+
+```{r echo=FALSE}
+resSigSvN$symbol <- mapIds(org.Hs.eg.db,
+                     keys=gsub("\\..*", "", row.names(resSigSvN)),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+resSigSvN$entrez <- mapIds(org.Hs.eg.db,
+                     keys=gsub("\\..*", "", row.names(resSigSvN)),
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+DresSvNOrdered <- resSigSvN[order(resSigSvN$log2FoldChange),]
+head(DresSvNOrdered,10)
+
+```
+
+### Comparació entre el grup ELI i NIT.
+
+```{r echo=FALSE}
+resSigEvN$symbol <- mapIds(org.Hs.eg.db,
+                     keys=gsub("\\..*", "", row.names(resSigEvN)),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+resSigEvN$entrez <- mapIds(org.Hs.eg.db,
+                     keys=gsub("\\..*", "", row.names(resSigEvN)),
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+DresEvNOrdered <- resSigEvN[order(resSigEvN$log2FoldChange),]
+head(DresEvNOrdered,10)
+
+```
+
+### Comparació entre el grup ELI i SFI.
+
+```{r echo=FALSE}
+resSigEvS$symbol <- mapIds(org.Hs.eg.db,
+                     keys=gsub("\\..*", "", row.names(resSigEvS)),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+resSigEvS$entrez <- mapIds(org.Hs.eg.db,
+                     keys=gsub("\\..*", "", row.names(resSigEvS)),
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+DresEvSOrdered <- resSigEvS[order(resSigEvS$log2FoldChange),]
+head(DresEvSOrdered,10)
+
+```
+
+En el cas dels gens que s'expressen menys observem que la majoria dels gens seleccionats si que els hem pogut relacionar amb el seu gen symbol i amb el seu codi enterez.
+
+<div id='id8' />
+## 8. Significancia Biològica
+
+Per a realitzar l'estudi de significat biològic el primer que hauré de fer és crear per cada comparació les llistes dels codi entrez dels resultats obtinguts.
+Aques anàlisi el faré tenint agafant el transcrits que tenen un log2FoldChange superior a 2 en els casos
+Utilitzare el KEGG Gene Set Enrichment Analysis que ofereix la llibreria ClusterProfile.
+
+<div id='id81' />
+### 8.1 Enriquiment dels resultats de cada grup
+
+### Grup SFI i NIT 
+
+```{r echo=FALSE}
+GeneListSvN= UresSvNOrdered$log2FoldChange
+names(GeneListSvN) = as.character(UresSvNOrdered$entrez)
+
+geneSvN <- names(GeneListSvN)[abs(GeneListSvN) > 2]
+head(geneSvN)
+```
+
+```{r echo=FALSE}
+library(clusterProfiler)
+SvN<- enrichKEGG(gene = geneSvN,
+                 organism  = 'hsa',
+                 pvalueCutoff = 0.05)
+
+head(SvN)
+
+
+```
+
+
+
+Com ja haviem comentat anteriorment aquesta comparació té un resultat de de significació biològica pobre. Tot i que la descripció dels gens que podrien formar un cluster de sobre expressió concorden amb el cas d'estudi, només ha trobat dos grups amb molt pocs gens cada un. Segurament la diferencia en l'expressió genètica dels grups SFI i NIT és baixa.
+
+### Grup ELI i NIT 
+
+```{r echo=FALSE}
+library(clusterProfiler)
+GeneListEvN= UresEvNOrdered$log2FoldChange
+names(GeneListEvN) = as.character(UresEvNOrdered$entrez)
+
+geneEvN <- names(GeneListEvN)[abs(GeneListEvN) > 2]
+head(geneEvN)
+
+```
+
+```{r echo=FALSE}
+EvN<- enrichKEGG(gene = geneEvN,
+                 organism  = 'hsa',
+                 pvalueCutoff = 0.05)
+
+head(EvN,10)
+
+```
+En aquesta comparació sí que hem obtingut un resultat més ampli i amb més significació com per poder valorar.
+
+### Grup ELI i SFI
+
+```{r echo=FALSE}
+GeneListEvS= UresEvSOrdered$log2FoldChange
+names(GeneListEvS) = as.character(UresEvSOrdered$entrez)
+
+geneEvS <- names(GeneListEvS)[abs(GeneListEvS) > 2]
+head(geneEvS)
+
+```
+
+
+```{r echo=FALSE}
+EvS<- enrichKEGG(gene = geneEvS,
+                 organism  = 'hsa',
+                 pvalueCutoff = 0.05)
+
+head(EvS,10)
+
+```
+
+<div id='id82' />
+### 8.2 Visualització funcional dels transcrips diferenciats
+
+Només he volgut fer el diagrama funcional de les comparacions que impliquen el grup ELI. Aquest grup ha sigut el que ha generat més diferencies d'expressió quan el comparem amb els altres dos grups. Biològicament tindria sentit ja que aquest grup correspon als teixits amb més infiltració linfocítica i per tant, té sentit que tingui una quantitat d'alteracions genètiques més elevada quan es compara amb els altres dos teixits. 
+
+###  ELIvsNIT
+
+```{r echo=FALSE}
+library(enrichplot)
+library(DOSE)
+ELIvsNIT <- names(GeneListEvN)[abs(GeneListEvN) <2]
+
+edoEvN <- enrichDGN(ELIvsNIT)
+
+barplot(edoEvN, showCategory=20)
+
+```
+
+### ELIvsSFI
+
+```{r echo=FALSE}
+ELIvsSFI <- names(GeneListEvS)[abs(GeneListEvS) <2]
+edoEvS <- enrichDGN(ELIvsSFI)
+barplot(edoEvS, showCategory=20)
+
+```
+
+En les dos comparacions observem, tot i que amb intensitats diferents, que els gens diferencialment expressats participen en gairebé les mateixes rutes i desenvolupen les mateixes funcions. 
+
+<div id='id9' />
+## 9. Conclusió
+
+La conclusió d'aquest estudi és que la comparació de l'expressió genètica diferencial entre el grup (ELIvsSFI i ELIvsNIT) de teixit Extensive lymphoid infiltrates amb els grups Not infiltrated tissues i Small focal infiltrates existeix i la funció daquests trànscrits diferencialment expressats són les mateixes.
+També observem que no hi ha una expressió genètica diferencial quan comparem els grups Not infiltrated tissues i Small focal infiltrates (NITvsSFI).
